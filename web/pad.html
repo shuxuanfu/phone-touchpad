@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Phone Touchpad</title>
+  <style>
+    :root {
+      --bg: #0a0a0c;
+      --surface: #141418;
+      --border: #2a2a32;
+      --text: #f2f2f7;
+      --muted: #8e8e93;
+      --accent: #0a84ff;
+      --ok: #30d158;
+      --warn: #ff9f0a;
+      --touch: rgba(10, 132, 255, 0.25);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow: hidden;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--warn);
+    }
+
+    .dot.connected { background: var(--ok); }
+
+    .toolbar {
+      display: flex;
+      gap: 8px;
+    }
+
+    button.icon-btn {
+      border: 1px solid var(--border);
+      background: #1c1c22;
+      color: var(--text);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    button.icon-btn.active {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    #pad {
+      flex: 1;
+      position: relative;
+      background:
+        radial-gradient(circle at 20% 20%, rgba(10, 132, 255, 0.06), transparent 40%),
+        radial-gradient(circle at 80% 80%, rgba(48, 209, 88, 0.04), transparent 35%),
+        var(--bg);
+      overflow: hidden;
+    }
+
+    #pad::before {
+      content: "";
+      position: absolute;
+      inset: 24px;
+      border: 1px dashed var(--border);
+      border-radius: 24px;
+      pointer-events: none;
+      opacity: 0.5;
+    }
+
+    .hint {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+
+    .hint.hidden { opacity: 0; }
+
+    .touch-dot {
+      position: absolute;
+      width: 44px;
+      height: 44px;
+      margin-left: -22px;
+      margin-top: -22px;
+      border-radius: 50%;
+      background: var(--touch);
+      border: 2px solid rgba(10, 132, 255, 0.5);
+      pointer-events: none;
+      transform: scale(0.85);
+      opacity: 0;
+      will-change: transform, left, top;
+    }
+
+    .touch-dot.show {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="status">
+        <span class="dot" id="dot"></span>
+        <span id="statusText">连接中...</span>
+      </div>
+      <div class="toolbar">
+        <button class="icon-btn" id="btnSens" title="灵敏度">灵敏度</button>
+        <button class="icon-btn" id="btnScroll" title="双指滚动模式">滚动</button>
+        <button class="icon-btn" id="btnKeyboard" title="打开键盘">键盘</button>
+      </div>
+    </header>
+    <div id="pad">
+      <div class="hint" id="hint">
+        单指移动光标<br />
+        单击 / 双击点击<br />
+        长按拖动 · 双指滚动<br />
+        双指轻点 = 右键
+      </div>
+      <div class="touch-dot" id="touchDot"></div>
+    </div>
+  </div>
+
+  <script>
+    const pad = document.getElementById("pad");
+    const dot = document.getElementById("dot");
+    const statusText = document.getElementById("statusText");
+    const hint = document.getElementById("hint");
+    const touchDot = document.getElementById("touchDot");
+    const btnSens = document.getElementById("btnSens");
+    const btnScroll = document.getElementById("btnScroll");
+    const btnKeyboard = document.getElementById("btnKeyboard");
+
+    let ws = null;
+    let reconnectTimer = null;
+    let scrollMode = false;
+    let sensitivity = parseFloat(localStorage.getItem("pt_sens") || "2.2");
+
+    // 每帧合并移动/滚动，减少 WebSocket 消息数量
+    let pendingDx = 0;
+    let pendingDy = 0;
+    let pendingScroll = 0;
+    let flushRaf = null;
+
+    const LONG_PRESS_MS = 280;
+    const TAP_MAX_MOVE = 12;
+    const TAP_MAX_MS = 220;
+    const DOUBLE_TAP_MS = 300;
+
+    const pointers = new Map();
+    let primaryId = null;
+    let dragActive = false;
+    let longPressTimer = null;
+    let lastTapTime = 0;
+    let movedSinceDown = false;
+
+    function wsUrl() {
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      return `${proto}//${location.host}/ws`;
+    }
+
+    function send(msg) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+      }
+    }
+
+    function sendCompact(text) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(text);
+      }
+    }
+
+    function scheduleFlush() {
+      if (flushRaf !== null) return;
+      flushRaf = requestAnimationFrame(flushMotion);
+    }
+
+    function flushMotion() {
+      flushRaf = null;
+      const s = scrollMode ? 1.0 : sensitivity;
+
+      if (pendingDx !== 0 || pendingDy !== 0) {
+        const dx = pendingDx * s;
+        const dy = pendingDy * s;
+        pendingDx = 0;
+        pendingDy = 0;
+        // 紧凑格式，减少 JSON 解析开销
+        sendCompact(`m,${dx.toFixed(2)},${dy.toFixed(2)}`);
+        hint.classList.add("hidden");
+      }
+
+      if (pendingScroll !== 0) {
+        const dy = pendingScroll * 0.9;
+        pendingScroll = 0;
+        sendCompact(`s,${dy.toFixed(2)}`);
+        hint.classList.add("hidden");
+      }
+    }
+
+    function queueMove(dx, dy) {
+      pendingDx += dx;
+      pendingDy += dy;
+      scheduleFlush();
+    }
+
+    function queueScroll(dy) {
+      pendingScroll += dy;
+      scheduleFlush();
+    }
+
+    function connect() {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+      ws = new WebSocket(wsUrl());
+
+      ws.onopen = () => {
+        dot.classList.add("connected");
+        statusText.textContent = "已连接";
+        send({ type: "hello", device: navigator.userAgent });
+      };
+
+      ws.onclose = () => {
+        dot.classList.remove("connected");
+        statusText.textContent = "已断开，重连中...";
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connect, 1500);
+      };
+
+      ws.onerror = () => {
+        statusText.textContent = "连接失败";
+      };
+    }
+
+    function showTouchVisual(x, y) {
+      const rect = pad.getBoundingClientRect();
+      touchDot.style.left = `${x - rect.left}px`;
+      touchDot.style.top = `${y - rect.top}px`;
+      touchDot.classList.add("show");
+    }
+
+    function hideTouchVisual() {
+      touchDot.classList.remove("show");
+    }
+
+    function handleMove(dx, dy) {
+      queueMove(dx, dy);
+    }
+
+    function handleScroll(dy) {
+      queueScroll(dy);
+    }
+
+    function updateSensLabel() {
+      btnSens.textContent = `×${sensitivity.toFixed(1)}`;
+    }
+    updateSensLabel();
+
+    pad.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        pointers.set(t.identifier, { x: t.clientX, y: t.clientY, startX: t.clientX, startY: t.clientY, startTime: Date.now() });
+      }
+
+      if (pointers.size === 1) {
+        primaryId = e.changedTouches[0].identifier;
+        movedSinceDown = false;
+        dragActive = false;
+        clearTimeout(longPressTimer);
+        longPressTimer = setTimeout(() => {
+          if (!movedSinceDown && pointers.size === 1) {
+            dragActive = true;
+            send({ type: "down", button: "left" });
+          }
+        }, LONG_PRESS_MS);
+        showTouchVisual(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+      }
+
+      if (pointers.size === 2) {
+        clearTimeout(longPressTimer);
+        if (dragActive) {
+          send({ type: "up", button: "left" });
+          dragActive = false;
+        }
+      }
+    }, { passive: false });
+
+    pad.addEventListener("touchmove", (e) => {
+      e.preventDefault();
+
+      if (pointers.size === 1) {
+        const t = e.changedTouches[0];
+        const p = pointers.get(t.identifier);
+        if (!p) return;
+
+        const dx = t.clientX - p.x;
+        const dy = t.clientY - p.y;
+
+        if (Math.abs(t.clientX - p.startX) > TAP_MAX_MOVE || Math.abs(t.clientY - p.startY) > TAP_MAX_MOVE) {
+          movedSinceDown = true;
+          clearTimeout(longPressTimer);
+        }
+
+        if (scrollMode) {
+          handleScroll(-dy);
+        } else {
+          handleMove(dx, dy);
+        }
+
+        p.x = t.clientX;
+        p.y = t.clientY;
+        showTouchVisual(t.clientX, t.clientY);
+        return;
+      }
+
+      if (pointers.size >= 2) {
+        let avgDy = 0;
+        let count = 0;
+        for (const t of e.changedTouches) {
+          const p = pointers.get(t.identifier);
+          if (!p) continue;
+          avgDy += t.clientY - p.y;
+          p.x = t.clientX;
+          p.y = t.clientY;
+          count++;
+        }
+        if (count > 0) {
+          handleScroll(-(avgDy / count));
+        }
+      }
+    }, { passive: false });
+
+    pad.addEventListener("touchend", (e) => {
+      e.preventDefault();
+
+      for (const t of e.changedTouches) {
+        const p = pointers.get(t.identifier);
+        if (!p) continue;
+
+        const elapsed = Date.now() - p.startTime;
+        const dist = Math.hypot(t.clientX - p.startX, t.clientY - p.startY);
+
+        if (pointers.size === 2 && elapsed < TAP_MAX_MS && dist < TAP_MAX_MOVE) {
+          send({ type: "click", button: "right" });
+        } else if (pointers.size === 1 && t.identifier === primaryId) {
+          flushMotion();
+          clearTimeout(longPressTimer);
+          if (dragActive) {
+            send({ type: "up", button: "left" });
+            dragActive = false;
+          } else if (!movedSinceDown && elapsed < TAP_MAX_MS && dist < TAP_MAX_MOVE) {
+            const now = Date.now();
+            if (now - lastTapTime < DOUBLE_TAP_MS) {
+              send({ type: "click", button: "left", count: 2 });
+              lastTapTime = 0;
+            } else {
+              send({ type: "click", button: "left", count: 1 });
+              lastTapTime = now;
+            }
+          }
+        }
+
+        pointers.delete(t.identifier);
+      }
+
+      if (pointers.size === 0) {
+        flushMotion();
+        primaryId = null;
+        hideTouchVisual();
+      }
+    }, { passive: false });
+
+    pad.addEventListener("touchcancel", () => {
+      flushMotion();
+      pointers.clear();
+      primaryId = null;
+      const wasDrag = dragActive;
+      dragActive = false;
+      clearTimeout(longPressTimer);
+      hideTouchVisual();
+      if (wasDrag) send({ type: "up", button: "left" });
+    }, { passive: false });
+
+    btnSens.addEventListener("click", () => {
+      const options = ["1.5", "2.0", "2.2", "2.8", "3.5"];
+      const idx = options.findIndex(v => parseFloat(v) >= sensitivity);
+      const next = options[(idx + 1) % options.length];
+      sensitivity = parseFloat(next);
+      localStorage.setItem("pt_sens", String(sensitivity));
+      updateSensLabel();
+    });
+
+    btnScroll.addEventListener("click", () => {
+      scrollMode = !scrollMode;
+      btnScroll.classList.toggle("active", scrollMode);
+      btnScroll.textContent = scrollMode ? "滚动中" : "滚动";
+    });
+
+    btnKeyboard.addEventListener("click", () => {
+      const text = prompt("输入要发送到电脑的文字：");
+      if (text) send({ type: "type", text });
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") connect();
+    });
+
+    connect();
+  </script>
+</body>
+</html>
