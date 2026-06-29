@@ -192,8 +192,12 @@
     let wakeLock = null;
     let scrollMode = false;
     let sensitivity = parseFloat(localStorage.getItem("pt_sens") || "2.2");
-    let scrollSensitivity = parseFloat(localStorage.getItem("pt_scroll_sens") || "0.35");
-    const SCROLL_SENS_OPTIONS = [0.15, 0.25, 0.35, 0.5, 0.7, 1.0];
+    let scrollSensitivity = parseFloat(localStorage.getItem("pt_scroll_sens") || "0.12");
+    if (scrollSensitivity > 0.35) {
+      scrollSensitivity = 0.12;
+      localStorage.setItem("pt_scroll_sens", "0.12");
+    }
+    const SCROLL_SENS_OPTIONS = [0.05, 0.08, 0.12, 0.18, 0.28, 0.45];
     let useBinary = true;
 
     let pendingDx = 0;

@@ -18,6 +18,8 @@ MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
 
 WHEEL_DELTA = 120
+# 约 N 像素触控位移 = 1 格滚轮（Windows 每格 120）
+PIXELS_PER_WHEEL_NOTCH = 48.0
 
 ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 
@@ -71,10 +73,10 @@ def scroll_vertical(delta: float) -> None:
     global _remainder_scroll
     if not delta:
         return
-    _remainder_scroll += delta
-    steps = int(_remainder_scroll)
-    if steps == 0:
+    _remainder_scroll += delta / PIXELS_PER_WHEEL_NOTCH
+    if abs(_remainder_scroll) < 1.0:
         return
+    steps = int(_remainder_scroll)
     _remainder_scroll -= steps
     _send_mouse(MOUSEEVENTF_WHEEL, data=steps * WHEEL_DELTA)
 
