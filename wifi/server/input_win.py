@@ -1,4 +1,4 @@
-"""Windows 低延迟鼠标/滚轮注入（ctypes SendInput，绕过 pynput 移动路径）。"""
+"""Windows 低延迟鼠标/滚轮注入（ctypes SendInput，子像素累积减少抖动）。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,11 @@ MOUSEEVENTF_WHEEL = 0x0800
 WHEEL_DELTA = 120
 
 ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+# 子像素余量，避免每帧 round 造成阶梯感
+_remainder_x = 0.0
+_remainder_y = 0.0
+_remainder_scroll = 0.0
 
 
 class MOUSEINPUT(ctypes.Structure):
@@ -47,17 +52,30 @@ def _send_mouse(flags: int, dx: int = 0, dy: int = 0, data: int = 0) -> None:
 
 
 def move_relative(dx: float, dy: float) -> None:
+    global _remainder_x, _remainder_y
     if not dx and not dy:
         return
-    _send_mouse(MOUSEEVENTF_MOVE, int(round(dx)), int(round(dy)))
+    _remainder_x += dx
+    _remainder_y += dy
+    mx = int(_remainder_x)
+    my = int(_remainder_y)
+    if mx:
+        _remainder_x -= mx
+    if my:
+        _remainder_y -= my
+    if mx or my:
+        _send_mouse(MOUSEEVENTF_MOVE, mx, my)
 
 
 def scroll_vertical(delta: float) -> None:
+    global _remainder_scroll
     if not delta:
         return
-    steps = int(round(delta))
+    _remainder_scroll += delta
+    steps = int(_remainder_scroll)
     if steps == 0:
-        steps = 1 if delta > 0 else -1
+        return
+    _remainder_scroll -= steps
     _send_mouse(MOUSEEVENTF_WHEEL, data=steps * WHEEL_DELTA)
 
 

@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import socket
+import struct
 import sys
 import threading
 import webbrowser
@@ -31,8 +32,12 @@ WEB_DIR = WIFI_ROOT / "client" / "web"
 
 keyboard = KeyboardController()
 
-# 服务端合并移动/滚动，以固定频率刷入系统（约 120Hz）
-TICK_SEC = 1 / 120
+# 服务端合并移动/滚动后刷入系统（240Hz，参考 RemotePC 等项目的高频注入思路）
+TICK_SEC = 1 / 240
+
+# 二进制协议：比文本 JSON/CSV 更小、解析更快
+BIN_MOVE = 1
+BIN_SCROLL = 2
 
 _move_lock = threading.Lock()
 _pending_move = [0.0, 0.0]
@@ -122,6 +127,32 @@ def start_motion_thread() -> None:
         _motion_thread.start()
 
 
+def handle_binary(data: bytes) -> None:
+    if not data:
+        return
+    op = data[0]
+    if op == BIN_MOVE and len(data) >= 9:
+        _, dx, dy = struct.unpack("<Bff", data[:9])
+        queue_move(dx, dy)
+    elif op == BIN_SCROLL and len(data) >= 5:
+        _, dy = struct.unpack("<Bf", data[:5])
+        queue_scroll(dy)
+
+
+def handle_text(text: str) -> None:
+    if text and text[0] in ("m", "s") and "," in text:
+        parts = text.split(",")
+        if parts[0] == "m" and len(parts) >= 3:
+            queue_move(float(parts[1]), float(parts[2]))
+            return
+        if parts[0] == "s" and len(parts) >= 2:
+            queue_scroll(float(parts[1]))
+            return
+
+    msg = json.loads(text)
+    handle_action(msg)
+
+
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=30, compress=False)
     await ws.prepare(request)
@@ -131,24 +162,13 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         async for raw in ws:
             if raw.type.name == "CLOSE":
                 break
-            if raw.type.name != "TEXT":
-                continue
             try:
-                text = raw.data
-                # 紧凑格式 m,dx,dy / s,dy — 比 JSON 解析更快
-                if text and text[0] in ("m", "s") and "," in text:
-                    parts = text.split(",")
-                    if parts[0] == "m" and len(parts) >= 3:
-                        queue_move(float(parts[1]), float(parts[2]))
-                        continue
-                    if parts[0] == "s" and len(parts) >= 2:
-                        queue_scroll(float(parts[1]))
-                        continue
-
-                msg = json.loads(text)
-                handle_action(msg)
+                if raw.type.name == "BINARY":
+                    handle_binary(raw.data)
+                elif raw.type.name == "TEXT":
+                    handle_text(raw.data)
             except json.JSONDecodeError:
-                log.warning("无效消息: %s", raw.data[:100])
+                log.warning("无效消息: %s", str(raw.data)[:100])
             except Exception:
                 log.exception("处理输入失败")
     finally:
@@ -217,7 +237,7 @@ def main() -> None:
 
     print()
     print("=" * 52)
-    print("  Phone Touchpad — WiFi 版 已启动")
+    print("  Phone Touchpad — WiFi 版 已启动 (240Hz + binary)")
     print("=" * 52)
     print(f"  电脑本机:  http://127.0.0.1:{args.port}/")
     print(f"  手机触控板: {pad_url}")

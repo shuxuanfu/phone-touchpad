@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0] — 2026-06-29 — 流畅度优化（WiFi 版）
+
+参考 [RemotePC](https://github.com/Stan006/RemotePC) 多通道低延迟思路与浏览器 [getCoalescedEvents](https://developer.mozilla.org/en-US/docs/Web/API/PointerEvent/getCoalescedEvents) API。
+
+### 性能
+- 移动/滚动改用 **二进制 WebSocket**（9/5 字节），减少解析开销
+- 服务端刷新率 **120Hz → 240Hz**
+- Windows 端 **子像素累积**，减少取整带来的跳跃感
+- 手机端使用 **Pointer Events + getCoalescedEvents** 捕获合并前的触摸采样（iOS 18.2+ Safari）
+- 启用 **Screen Wake Lock**，降低 iOS 后台限速概率
+- 保留文本协议兼容旧页面
+
+### 说明
+- 浏览器无法直接发 UDP；局域网 WebSocket 延迟已接近网络下限
+- 后续可考虑 WebRTC DataChannel（UDP 语义）进一步压低延迟
+
+---
+
 ## [0.3.1] — 2026-06-29 — 滚动方向修正（WiFi 版）
 
 ### 修复
