@@ -89,6 +89,8 @@
     #pad {
       flex: 1;
       position: relative;
+      width: 100%;
+      min-height: 0;
       background:
         radial-gradient(circle at 20% 20%, rgba(10, 132, 255, 0.06), transparent 40%),
         radial-gradient(circle at 80% 80%, rgba(48, 209, 88, 0.04), transparent 35%),
@@ -176,10 +178,17 @@
       inset: 0;
       display: flex;
       flex-direction: column;
+      z-index: 1;
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
     }
 
-    .view-panel.hidden {
-      display: none;
+    .view-panel.is-hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      z-index: 0;
     }
 
     #arrowPanel {
@@ -246,7 +255,8 @@
       </div>
     </header>
     <div class="main-area">
-    <div id="pad" class="view-panel">
+    <div id="padPanel" class="view-panel">
+      <div id="pad">
       <div class="hint" id="hint">
         单指移动光标<br />
         单击 / 双击点击<br />
@@ -256,8 +266,9 @@
       </div>
       <div class="touch-dot" id="touchDot"></div>
       <button type="button" class="voice-btn" id="btnVoice" title="按住说话（Ctrl+Alt）">说话</button>
+      </div>
     </div>
-    <div id="arrowPanel" class="view-panel hidden">
+    <div id="arrowPanel" class="view-panel is-hidden">
       <p class="dpad-hint">按住方向键发送到电脑<br />松开即释放</p>
       <div class="dpad">
         <button type="button" class="dpad-btn dpad-up" data-key="up" aria-label="上">↑</button>
@@ -280,7 +291,7 @@
     const btnKeyboard = document.getElementById("btnKeyboard");
     const btnVoice = document.getElementById("btnVoice");
     const btnMode = document.getElementById("btnMode");
-    const padPanel = document.getElementById("pad");
+    const padPanel = document.getElementById("padPanel");
     const arrowPanel = document.getElementById("arrowPanel");
     const dpadButtons = document.querySelectorAll(".dpad-btn");
 
@@ -602,13 +613,17 @@
       inputMode = mode;
       localStorage.setItem("pt_mode", mode);
       const isPad = mode === "pad";
-      padPanel.classList.toggle("hidden", !isPad);
-      arrowPanel.classList.toggle("hidden", isPad);
+      padPanel.classList.toggle("is-hidden", !isPad);
+      arrowPanel.classList.toggle("is-hidden", isPad);
       btnMode.textContent = isPad ? "方向键" : "触控板";
       btnMode.classList.toggle("active", !isPad);
       btnSens.style.display = isPad ? "" : "none";
       btnScroll.style.display = isPad ? "" : "none";
-      if (!isPad) {
+      if (isPad) {
+        releaseAllArrowKeys();
+        // 强制 Safari 重新计算布局
+        void padPanel.offsetHeight;
+      } else {
         stopVoice();
         releaseAllArrowKeys();
       }
