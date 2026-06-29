@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.1] — 2026-06-29 — 滚动灵敏度（WiFi 版）
+
+### 功能
+- 新增 **滚速** 按钮，独立调节上下滚动灵敏度（×0.15 ~ ×1.0）
+- 默认滚速从 ×0.9 降至 **×0.35**，解决滚动过快问题
+- 设置保存在 `localStorage`，刷新后保留
+
+---
+
 ## [0.4.0] — 2026-06-29 — 流畅度优化（WiFi 版）
 
 参考 [RemotePC](https://github.com/Stan006/RemotePC) 多通道低延迟思路与浏览器 [getCoalescedEvents](https://developer.mozilla.org/en-US/docs/Web/API/PointerEvent/getCoalescedEvents) API。

@@ -76,9 +76,10 @@
       background: #1c1c22;
       color: var(--text);
       border-radius: 10px;
-      padding: 8px 12px;
-      font-size: 13px;
+      padding: 8px 10px;
+      font-size: 12px;
       cursor: pointer;
+      white-space: nowrap;
     }
 
     button.icon-btn.active {
@@ -151,7 +152,8 @@
         <span id="statusText">连接中...</span>
       </div>
       <div class="toolbar">
-        <button class="icon-btn" id="btnSens" title="灵敏度">灵敏度</button>
+        <button class="icon-btn" id="btnSens" title="移动灵敏度">移动</button>
+        <button class="icon-btn" id="btnScrollSens" title="上下滚动灵敏度">滚速</button>
         <button class="icon-btn" id="btnScroll" title="双指滚动模式">滚动</button>
         <button class="icon-btn" id="btnKeyboard" title="打开键盘">键盘</button>
       </div>
@@ -160,7 +162,7 @@
       <div class="hint" id="hint">
         单指移动光标<br />
         单击 / 双击点击<br />
-        双指上滑 · 页面向上 · 双指下滑 · 页面向下<br />
+        双指上滑/下滑滚动 · 点「滚速」调快慢<br />
         双指轻点 = 右键
       </div>
       <div class="touch-dot" id="touchDot"></div>
@@ -174,6 +176,7 @@
     const hint = document.getElementById("hint");
     const touchDot = document.getElementById("touchDot");
     const btnSens = document.getElementById("btnSens");
+    const btnScrollSens = document.getElementById("btnScrollSens");
     const btnScroll = document.getElementById("btnScroll");
     const btnKeyboard = document.getElementById("btnKeyboard");
 
@@ -189,6 +192,8 @@
     let wakeLock = null;
     let scrollMode = false;
     let sensitivity = parseFloat(localStorage.getItem("pt_sens") || "2.2");
+    let scrollSensitivity = parseFloat(localStorage.getItem("pt_scroll_sens") || "0.35");
+    const SCROLL_SENS_OPTIONS = [0.15, 0.25, 0.35, 0.5, 0.7, 1.0];
     let useBinary = true;
 
     let pendingDx = 0;
@@ -269,7 +274,7 @@
       }
 
       if (pendingScroll !== 0) {
-        sendScrollBinary(pendingScroll * 0.9);
+        sendScrollBinary(pendingScroll * scrollSensitivity);
         pendingScroll = 0;
         hint.classList.add("hidden");
       }
@@ -325,9 +330,15 @@
     }
 
     function updateSensLabel() {
-      btnSens.textContent = `×${sensitivity.toFixed(1)}`;
+      btnSens.textContent = `移动×${sensitivity.toFixed(1)}`;
     }
+
+    function updateScrollSensLabel() {
+      btnScrollSens.textContent = `滚速×${scrollSensitivity.toFixed(2)}`;
+    }
+
     updateSensLabel();
+    updateScrollSensLabel();
 
     function pointerCount() {
       return pointers.size;
@@ -514,6 +525,14 @@
       sensitivity = parseFloat(next);
       localStorage.setItem("pt_sens", String(sensitivity));
       updateSensLabel();
+    });
+
+    btnScrollSens.addEventListener("click", () => {
+      const idx = SCROLL_SENS_OPTIONS.findIndex(v => v >= scrollSensitivity - 0.001);
+      const next = SCROLL_SENS_OPTIONS[(idx + 1) % SCROLL_SENS_OPTIONS.length];
+      scrollSensitivity = next;
+      localStorage.setItem("pt_scroll_sens", String(scrollSensitivity));
+      updateScrollSensLabel();
     });
 
     btnScroll.addEventListener("click", () => {
