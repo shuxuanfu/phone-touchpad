@@ -1,6 +1,6 @@
 """
-Phone Touchpad — 用手机浏览器当 Windows 触控板。
-启动后在电脑浏览器打开显示的地址，iPhone Safari 访问同一地址即可使用。
+Phone Touchpad — WiFi 版
+用手机浏览器当 Windows 触控板，通过局域网 WebSocket 连接。
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import socket
+import sys
 import threading
 import webbrowser
 from pathlib import Path
@@ -18,13 +19,15 @@ from pathlib import Path
 from aiohttp import web
 from pynput.keyboard import Controller as KeyboardController
 
+# 保证同目录模块可导入
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import input_win
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("phone-touchpad")
+log = logging.getLogger("phone-touchpad-wifi")
 
-ROOT = Path(__file__).resolve().parent
-WEB_DIR = ROOT / "web"
+WIFI_ROOT = Path(__file__).resolve().parent.parent
+WEB_DIR = WIFI_ROOT / "client" / "web"
 
 keyboard = KeyboardController()
 
@@ -214,7 +217,7 @@ def main() -> None:
 
     print()
     print("=" * 52)
-    print("  Phone Touchpad 已启动 (低延迟模式)")
+    print("  Phone Touchpad — WiFi 版 已启动")
     print("=" * 52)
     print(f"  电脑本机:  http://127.0.0.1:{args.port}/")
     print(f"  手机触控板: {pad_url}")

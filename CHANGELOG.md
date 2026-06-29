@@ -1,6 +1,17 @@
 # Changelog
 
-## [0.2.0] — 2026-06-29 — 低延迟优化
+## [0.3.0] — 2026-06-29 — 目录重构（WiFi 版）
+
+### 结构
+- 按连接方式拆分目录，当前实现归入 `wifi/`
+- 服务端移至 `wifi/server/`（`main.py`、`input_win.py`）
+- 前端移至 `wifi/client/web/`
+- 根目录 `start.bat` 作为统一入口，转发至 `wifi/start.bat`
+- 新增 `wifi/README.md`，根 README 改为版本索引
+
+---
+
+## [0.2.0] — 2026-06-29 — 低延迟优化（WiFi 版）
 
 ### 性能
 - 手机端使用 `requestAnimationFrame` 合并每帧移动/滚动，减少 WebSocket 消息量
@@ -20,7 +31,7 @@
 
 ---
 
-## [0.1.0] — 2026-06-29 — 初始版本
+## [0.1.0] — 2026-06-29 — 初始版本（WiFi 版）
 
 ### 功能
 - Python 服务端 + 浏览器触控板，无需安装 iOS App

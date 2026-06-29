@@ -1,4 +1,5 @@
 .venv/
+wifi/.venv/
 __pycache__/
 *.py[cod]
 *$py.class
