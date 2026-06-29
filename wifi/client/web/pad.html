@@ -165,6 +165,70 @@
       color: var(--ok);
     }
 
+    .main-area {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .view-panel {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .view-panel.hidden {
+      display: none;
+    }
+
+    #arrowPanel {
+      align-items: center;
+      justify-content: center;
+      background: var(--bg);
+      padding: 24px;
+    }
+
+    .dpad-hint {
+      color: var(--muted);
+      font-size: 14px;
+      margin-bottom: 28px;
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    .dpad {
+      display: grid;
+      grid-template-columns: repeat(3, 88px);
+      grid-template-rows: repeat(3, 88px);
+      gap: 12px;
+    }
+
+    .dpad-btn {
+      border: 2px solid var(--border);
+      background: #1c1c22;
+      color: var(--text);
+      border-radius: 18px;
+      font-size: 28px;
+      font-weight: 600;
+      touch-action: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .dpad-btn.active {
+      border-color: var(--accent);
+      background: rgba(10, 132, 255, 0.15);
+      color: var(--accent);
+    }
+
+    .dpad-up { grid-column: 2; grid-row: 1; }
+    .dpad-left { grid-column: 1; grid-row: 2; }
+    .dpad-right { grid-column: 3; grid-row: 2; }
+    .dpad-down { grid-column: 2; grid-row: 3; }
+
   </style>
 </head>
 <body>
@@ -175,12 +239,14 @@
         <span id="statusText">连接中...</span>
       </div>
       <div class="toolbar">
+        <button class="icon-btn" id="btnMode" title="切换触控板/方向键">方向键</button>
         <button class="icon-btn" id="btnSens" title="灵敏度">灵敏度</button>
         <button class="icon-btn" id="btnScroll" title="双指滚动模式">滚动</button>
         <button class="icon-btn" id="btnKeyboard" title="打开键盘">键盘</button>
       </div>
     </header>
-    <div id="pad">
+    <div class="main-area">
+    <div id="pad" class="view-panel">
       <div class="hint" id="hint">
         单指移动光标<br />
         单击 / 双击点击<br />
@@ -190,6 +256,16 @@
       </div>
       <div class="touch-dot" id="touchDot"></div>
       <button type="button" class="voice-btn" id="btnVoice" title="按住说话（Ctrl+Alt）">说话</button>
+    </div>
+    <div id="arrowPanel" class="view-panel hidden">
+      <p class="dpad-hint">按住方向键发送到电脑<br />松开即释放</p>
+      <div class="dpad">
+        <button type="button" class="dpad-btn dpad-up" data-key="up" aria-label="上">↑</button>
+        <button type="button" class="dpad-btn dpad-left" data-key="left" aria-label="左">←</button>
+        <button type="button" class="dpad-btn dpad-right" data-key="right" aria-label="右">→</button>
+        <button type="button" class="dpad-btn dpad-down" data-key="down" aria-label="下">↓</button>
+      </div>
+    </div>
     </div>
   </div>
 
@@ -203,8 +279,14 @@
     const btnScroll = document.getElementById("btnScroll");
     const btnKeyboard = document.getElementById("btnKeyboard");
     const btnVoice = document.getElementById("btnVoice");
+    const btnMode = document.getElementById("btnMode");
+    const padPanel = document.getElementById("pad");
+    const arrowPanel = document.getElementById("arrowPanel");
+    const dpadButtons = document.querySelectorAll(".dpad-btn");
 
     const VOICE_KEYS = ["ctrl", "alt"];
+    let inputMode = localStorage.getItem("pt_mode") || "pad";
+    const heldArrowKeys = new Set();
 
     let ws = null;
     let reconnectTimer = null;
@@ -338,6 +420,7 @@
 
       ws.onclose = () => {
         stopKeepalive();
+        releaseAllArrowKeys();
         dot.classList.remove("connected");
         statusText.textContent = "已断开，重连中...";
         stopVoice();
@@ -507,6 +590,66 @@
       if (wasDrag) send({ type: "up", button: "left" });
     }, { passive: false });
 
+    function releaseAllArrowKeys() {
+      for (const key of heldArrowKeys) {
+        send({ type: "key_up", key });
+      }
+      heldArrowKeys.clear();
+      dpadButtons.forEach((btn) => btn.classList.remove("active"));
+    }
+
+    function setInputMode(mode) {
+      inputMode = mode;
+      localStorage.setItem("pt_mode", mode);
+      const isPad = mode === "pad";
+      padPanel.classList.toggle("hidden", !isPad);
+      arrowPanel.classList.toggle("hidden", isPad);
+      btnMode.textContent = isPad ? "方向键" : "触控板";
+      btnMode.classList.toggle("active", !isPad);
+      btnSens.style.display = isPad ? "" : "none";
+      btnScroll.style.display = isPad ? "" : "none";
+      if (!isPad) {
+        stopVoice();
+        releaseAllArrowKeys();
+      }
+    }
+
+    function bindDpadButton(btn) {
+      const key = btn.dataset.key;
+
+      function onDown(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (heldArrowKeys.has(key)) return;
+        heldArrowKeys.add(key);
+        btn.classList.add("active");
+        send({ type: "key_down", key });
+      }
+
+      function onUp(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!heldArrowKeys.has(key)) return;
+        heldArrowKeys.delete(key);
+        btn.classList.remove("active");
+        send({ type: "key_up", key });
+      }
+
+      btn.addEventListener("touchstart", onDown, { passive: false });
+      btn.addEventListener("touchend", onUp, { passive: false });
+      btn.addEventListener("touchcancel", onUp, { passive: false });
+      btn.addEventListener("mousedown", onDown);
+      btn.addEventListener("mouseup", onUp);
+      btn.addEventListener("mouseleave", onUp);
+    }
+
+    dpadButtons.forEach(bindDpadButton);
+    setInputMode(inputMode);
+
+    btnMode.addEventListener("click", () => {
+      setInputMode(inputMode === "pad" ? "arrows" : "pad");
+    });
+
     btnSens.addEventListener("click", () => {
       const options = ["1.5", "2.0", "2.2", "2.8", "3.5"];
       const idx = options.findIndex(v => parseFloat(v) >= sensitivity);
@@ -583,6 +726,7 @@
         }
       } else {
         stopVoice();
+        releaseAllArrowKeys();
       }
     });
 

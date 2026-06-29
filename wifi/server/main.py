@@ -37,6 +37,10 @@ _KEY_ALIASES = {
     "alt": Key.alt,
     "shift": Key.shift,
     "win": Key.cmd,
+    "up": Key.up,
+    "down": Key.down,
+    "left": Key.left,
+    "right": Key.right,
 }
 
 _held_hotkeys: list[str] = []
@@ -106,6 +110,15 @@ def _hotkey_up(keys: list[str]) -> None:
         _held_hotkeys.remove(name)
 
 
+def _key_tap(name: str) -> None:
+    key = _KEY_ALIASES.get((name or "").lower())
+    if key is None:
+        log.warning("未知按键: %s", name)
+        return
+    keyboard.press(key)
+    keyboard.release(key)
+
+
 def hotkey_down(keys: list[str]) -> None:
     with _input_lock:
         _hotkey_down(keys)
@@ -167,6 +180,20 @@ def handle_action(msg: dict) -> None:
 
     if kind == "scroll":
         queue_scroll(float(msg.get("dy", 0)))
+        return
+
+    if kind in ("key_down", "key_up", "key_tap"):
+        with _input_lock:
+            if kind == "key_down":
+                key = msg.get("key")
+                if key:
+                    _hotkey_down([key])
+            elif kind == "key_up":
+                key = msg.get("key")
+                if key:
+                    _hotkey_up([key])
+            elif kind == "key_tap":
+                _key_tap(msg.get("key"))
         return
 
     # 点击前先刷完排队中的移动，避免点击位置偏移
