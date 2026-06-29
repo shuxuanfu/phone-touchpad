@@ -18,8 +18,8 @@ MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
 
 WHEEL_DELTA = 120
-# 客户端 sens=1.0 时，约 N 像素手指位移 ≈ 一格滚轮（120）
-PIXELS_PER_NOTCH = 20.0
+# 客户端滚速=1.0 时，每像素对应的滚轮单位（120≈一格）
+SCROLL_UNITS_PER_PIXEL = 5.0
 
 ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 
@@ -73,13 +73,12 @@ def scroll_vertical(delta: float) -> None:
     global _remainder_scroll
     if not delta:
         return
-    # 按像素换算为滚轮增量（可小于 120），小幅滑动也能生效
-    _remainder_scroll += delta * (WHEEL_DELTA / PIXELS_PER_NOTCH)
-    wheel = int(_remainder_scroll)
+    _remainder_scroll += delta * SCROLL_UNITS_PER_PIXEL
+    wheel = round(_remainder_scroll)
     if wheel == 0:
         return
     _remainder_scroll -= wheel
-    _send_mouse(MOUSEEVENTF_WHEEL, data=wheel)
+    _send_mouse(MOUSEEVENTF_WHEEL, data=int(wheel))
 
 
 _BUTTON_FLAGS = {

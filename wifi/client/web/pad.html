@@ -162,7 +162,7 @@
       <div class="hint" id="hint">
         单指移动光标<br />
         单击 / 双击点击<br />
-        双指上滑/下滑滚动 · 点「滚速」调快慢<br />
+        双指上滑/下滑滚动 · 建议用 Safari 打开<br />
         双指轻点 = 右键
       </div>
       <div class="touch-dot" id="touchDot"></div>
@@ -192,8 +192,16 @@
     let wakeLock = null;
     let scrollMode = false;
     let sensitivity = parseFloat(localStorage.getItem("pt_sens") || "2.2");
-    let scrollSensitivity = parseFloat(localStorage.getItem("pt_scroll_sens") || "0.3");
-    const SCROLL_SENS_OPTIONS = [0.15, 0.25, 0.35, 0.5, 0.7, 1.0];
+    let scrollSensitivity = parseFloat(localStorage.getItem("pt_scroll_sens") || "0.35");
+    if (localStorage.getItem("pt_scroll_ver") !== "3") {
+      scrollSensitivity = 0.35;
+      localStorage.setItem("pt_scroll_sens", "0.35");
+      localStorage.setItem("pt_scroll_ver", "3");
+    }
+    const SCROLL_SENS_OPTIONS = [0.2, 0.35, 0.5, 0.7, 1.0, 1.3];
+
+    const touchLast = new Map();
+    let activeTouchCount = 0;
     let useBinary = true;
 
     let pendingDx = 0;
@@ -351,7 +359,7 @@
       let moveDx = 0;
       let moveDy = 0;
       let scrollDy = 0;
-      const multi = pointerCount() >= 2;
+      const multi = pointerCount() >= 2 && activeTouchCount < 2;
 
       for (const ev of events) {
         const dx = ev.clientX - p.x;
@@ -461,6 +469,7 @@
 
       pad.addEventListener("pointermove", (e) => {
         if (!pointers.has(e.pointerId)) return;
+        if (activeTouchCount >= 2) return;
         e.preventDefault();
         const coalesced = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
         onMoveCommon(e.pointerId, coalesced, e.clientX, e.clientY);
@@ -485,13 +494,31 @@
     } else {
       pad.addEventListener("touchstart", (e) => {
         e.preventDefault();
+        activeTouchCount = e.touches.length;
         for (const t of e.changedTouches) {
           onDownCommon(t.identifier, t.clientX, t.clientY);
+        }
+        for (const t of e.touches) {
+          touchLast.set(t.identifier, { x: t.clientX, y: t.clientY });
         }
       }, { passive: false });
 
       pad.addEventListener("touchmove", (e) => {
         e.preventDefault();
+        activeTouchCount = e.touches.length;
+
+        if (e.touches.length >= 2) {
+          let sumDy = 0;
+          for (const t of e.touches) {
+            const prev = touchLast.get(t.identifier);
+            if (prev) sumDy += t.clientY - prev.y;
+            touchLast.set(t.identifier, { x: t.clientX, y: t.clientY });
+          }
+          queueScroll(sumDy / e.touches.length);
+          hint.classList.add("hidden");
+          return;
+        }
+
         for (const t of e.changedTouches) {
           if (!pointers.has(t.identifier)) continue;
           const p = pointers.get(t.identifier);
@@ -501,13 +528,17 @@
 
       pad.addEventListener("touchend", (e) => {
         e.preventDefault();
+        activeTouchCount = e.touches.length;
         for (const t of e.changedTouches) {
+          touchLast.delete(t.identifier);
           onUpCommon(t.identifier, t.clientX, t.clientY);
         }
       }, { passive: false });
 
       pad.addEventListener("touchcancel", () => {
         flushMotion();
+        activeTouchCount = 0;
+        touchLast.clear();
         const wasDrag = dragActive;
         pointers.clear();
         primaryId = null;
@@ -517,6 +548,49 @@
         if (wasDrag) sendJson({ type: "up", button: "left" });
       }, { passive: false });
     }
+
+    // iOS 双指滚动：始终走 Touch（Pointer 双指在 Safari/微信里不可靠）
+    pad.addEventListener("touchstart", (e) => {
+      activeTouchCount = e.touches.length;
+      for (const t of e.touches) {
+        if (!touchLast.has(t.identifier)) {
+          touchLast.set(t.identifier, { x: t.clientX, y: t.clientY });
+        }
+      }
+    }, { passive: true });
+
+    pad.addEventListener("touchmove", (e) => {
+      activeTouchCount = e.touches.length;
+      if (e.touches.length < 2) return;
+
+      e.preventDefault();
+      let sumDy = 0;
+      let count = 0;
+      for (const t of e.touches) {
+        const prev = touchLast.get(t.identifier);
+        if (prev) {
+          sumDy += t.clientY - prev.y;
+          count++;
+        }
+        touchLast.set(t.identifier, { x: t.clientX, y: t.clientY });
+      }
+      if (count > 0) {
+        queueScroll(sumDy / count);
+        hint.classList.add("hidden");
+      }
+    }, { passive: false });
+
+    pad.addEventListener("touchend", (e) => {
+      activeTouchCount = e.touches.length;
+      for (const t of e.changedTouches) {
+        touchLast.delete(t.identifier);
+      }
+    }, { passive: true });
+
+    pad.addEventListener("touchcancel", () => {
+      activeTouchCount = 0;
+      touchLast.clear();
+    }, { passive: true });
 
     btnSens.addEventListener("click", () => {
       const options = ["1.5", "2.0", "2.2", "2.8", "3.5"];
