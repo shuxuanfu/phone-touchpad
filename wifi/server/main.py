@@ -11,14 +11,13 @@ import io
 import json
 import logging
 import socket
-import struct
 import sys
 import threading
 import webbrowser
 from pathlib import Path
 
 from aiohttp import web
-from pynput.keyboard import Controller as KeyboardController
+from pynput.keyboard import Controller as KeyboardController, Key
 
 # 保证同目录模块可导入
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -32,17 +31,29 @@ WEB_DIR = WIFI_ROOT / "client" / "web"
 
 keyboard = KeyboardController()
 
-# 服务端合并移动/滚动后刷入系统（240Hz，参考 RemotePC 等项目的高频注入思路）
-TICK_SEC = 1 / 240
+_KEY_ALIASES = {
+    "ctrl": Key.ctrl,
+    "control": Key.ctrl,
+    "alt": Key.alt,
+    "shift": Key.shift,
+    "win": Key.cmd,
+}
 
-# 二进制协议：比文本 JSON/CSV 更小、解析更快
-BIN_MOVE = 1
-BIN_SCROLL = 2
+_held_hotkeys: list[str] = []
+
+# 服务端合并移动/滚动，以固定频率刷入系统（约 120Hz）
+TICK_SEC = 1 / 120
+# 滚轮每 N 次 tick 才真正 SendInput 一次（降低系统输入压力）
+SCROLL_FLUSH_EVERY = 3  # ≈40Hz
+# 单次刷入上限，避免异常积压
+MAX_PENDING_MOVE = 400.0
+MAX_PENDING_SCROLL = 400.0
 
 _move_lock = threading.Lock()
 _pending_move = [0.0, 0.0]
 _pending_scroll = 0.0
 _input_lock = threading.Lock()
+_scroll_loop_tick = 0
 
 
 def local_ip() -> str:
@@ -54,30 +65,90 @@ def local_ip() -> str:
         return "127.0.0.1"
 
 
+def _release_all_hotkeys() -> None:
+    global _held_hotkeys
+    if not _held_hotkeys:
+        return
+    for name in reversed(_held_hotkeys):
+        key = _KEY_ALIASES.get(name.lower())
+        if key is not None:
+            keyboard.release(key)
+    _held_hotkeys = []
+
+
+def release_all_hotkeys() -> None:
+    with _input_lock:
+        _release_all_hotkeys()
+
+
+def _hotkey_down(keys: list[str]) -> None:
+    global _held_hotkeys
+    for name in keys:
+        if name in _held_hotkeys:
+            continue
+        key = _KEY_ALIASES.get(name.lower())
+        if key is None:
+            log.warning("未知按键: %s", name)
+            continue
+        keyboard.press(key)
+        _held_hotkeys.append(name)
+
+
+def _hotkey_up(keys: list[str]) -> None:
+    global _held_hotkeys
+    for name in reversed(keys):
+        if name not in _held_hotkeys:
+            continue
+        key = _KEY_ALIASES.get(name.lower())
+        if key is None:
+            continue
+        keyboard.release(key)
+        _held_hotkeys.remove(name)
+
+
+def hotkey_down(keys: list[str]) -> None:
+    with _input_lock:
+        _hotkey_down(keys)
+
+
+def hotkey_up(keys: list[str]) -> None:
+    with _input_lock:
+        _hotkey_up(keys)
+
+
 def queue_move(dx: float, dy: float) -> None:
     with _move_lock:
-        _pending_move[0] += dx
-        _pending_move[1] += dy
+        _pending_move[0] = max(-MAX_PENDING_MOVE, min(MAX_PENDING_MOVE, _pending_move[0] + dx))
+        _pending_move[1] = max(-MAX_PENDING_MOVE, min(MAX_PENDING_MOVE, _pending_move[1] + dy))
 
 
 def queue_scroll(dy: float) -> None:
     global _pending_scroll
     with _move_lock:
-        _pending_scroll += dy
+        _pending_scroll = max(-MAX_PENDING_SCROLL, min(MAX_PENDING_SCROLL, _pending_scroll + dy))
 
 
-def flush_motion() -> None:
-    global _pending_scroll
+def flush_motion(*, force_scroll: bool = False) -> None:
+    global _pending_scroll, _scroll_loop_tick
     with _move_lock:
         dx, dy = _pending_move[0], _pending_move[1]
         scroll = _pending_scroll
         _pending_move[0] = 0.0
         _pending_move[1] = 0.0
         _pending_scroll = 0.0
-    if dx or dy:
-        input_win.move_relative(dx, dy)
-    if scroll:
-        input_win.scroll_vertical(scroll)
+
+    if dx or dy or scroll:
+        with _input_lock:
+            if dx or dy:
+                input_win.move_relative(dx, dy)
+            if scroll:
+                input_win.scroll_accumulate(scroll)
+
+    _scroll_loop_tick += 1
+    if force_scroll or _scroll_loop_tick >= SCROLL_FLUSH_EVERY:
+        _scroll_loop_tick = 0
+        with _input_lock:
+            input_win.scroll_flush()
 
 
 def handle_action(msg: dict) -> None:
@@ -85,6 +156,9 @@ def handle_action(msg: dict) -> None:
 
     if kind == "hello":
         log.info("客户端已连接: %s", msg.get("device", "unknown")[:80])
+        return
+
+    if kind == "ping":
         return
 
     if kind == "move":
@@ -96,7 +170,7 @@ def handle_action(msg: dict) -> None:
         return
 
     # 点击前先刷完排队中的移动，避免点击位置偏移
-    flush_motion()
+    flush_motion(force_scroll=True)
 
     with _input_lock:
         if kind == "down":
@@ -109,6 +183,10 @@ def handle_action(msg: dict) -> None:
             text = msg.get("text", "")
             if text:
                 keyboard.type(text)
+        elif kind == "hotkey_down":
+            _hotkey_down(msg.get("keys", ["ctrl", "alt"]))
+        elif kind == "hotkey_up":
+            _hotkey_up(msg.get("keys", ["ctrl", "alt"]))
         else:
             log.warning("未知消息: %s", kind)
 
@@ -127,53 +205,56 @@ def start_motion_thread() -> None:
         _motion_thread.start()
 
 
-def handle_binary(data: bytes) -> None:
-    if not data:
-        return
-    op = data[0]
-    if op == BIN_MOVE and len(data) >= 9:
-        _, dx, dy = struct.unpack("<Bff", data[:9])
-        queue_move(dx, dy)
-    elif op == BIN_SCROLL and len(data) >= 5:
-        _, dy = struct.unpack("<Bf", data[:5])
-        queue_scroll(dy)
-
-
-def handle_text(text: str) -> None:
-    if text and text[0] in ("m", "s") and "," in text:
-        parts = text.split(",")
-        if parts[0] == "m" and len(parts) >= 3:
-            queue_move(float(parts[1]), float(parts[2]))
-            return
-        if parts[0] == "s" and len(parts) >= 2:
-            queue_scroll(float(parts[1]))
-            return
-
-    msg = json.loads(text)
-    handle_action(msg)
-
-
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse(heartbeat=30, compress=False)
+    # heartbeat 放宽到 60s；iOS 内置浏览器对服务端 PING 响应不稳定
+    ws = web.WebSocketResponse(heartbeat=60, compress=False)
     await ws.prepare(request)
-    log.info("WebSocket 会话开始: %s", request.remote)
+    peer = request.remote
+    log.info("WebSocket 会话开始: %s", peer)
+    close_reason = "正常关闭"
 
     try:
         async for raw in ws:
             if raw.type.name == "CLOSE":
+                close_reason = "客户端 CLOSE"
                 break
+            if raw.type.name == "PING":
+                continue
+            if raw.type.name != "TEXT":
+                continue
             try:
-                if raw.type.name == "BINARY":
-                    handle_binary(raw.data)
-                elif raw.type.name == "TEXT":
-                    handle_text(raw.data)
+                text = raw.data
+                # 紧凑格式 m,dx,dy / s,dy — 比 JSON 解析更快
+                if text and text[0] in ("m", "s") and "," in text:
+                    parts = text.split(",")
+                    if parts[0] == "m" and len(parts) >= 3:
+                        queue_move(float(parts[1]), float(parts[2]))
+                        continue
+                    if parts[0] == "s" and len(parts) >= 2:
+                        queue_scroll(float(parts[1]))
+                        continue
+
+                msg = json.loads(text)
+                if msg.get("type") == "ping":
+                    continue
+                handle_action(msg)
             except json.JSONDecodeError:
-                log.warning("无效消息: %s", str(raw.data)[:100])
+                log.warning("无效消息: %s", raw.data[:100])
             except Exception:
                 log.exception("处理输入失败")
+    except asyncio.CancelledError:
+        close_reason = "服务端取消"
+        raise
+    except Exception as exc:
+        close_reason = f"异常: {exc}"
+        log.warning("WebSocket 异常: %s — %s", peer, exc)
     finally:
-        flush_motion()
-        log.info("WebSocket 会话结束: %s", request.remote)
+        flush_motion(force_scroll=True)
+        with _input_lock:
+            input_win.reset_motion_remainders()
+            _release_all_hotkeys()
+        code = ws.close_code if ws.close_code is not None else "-"
+        log.info("WebSocket 会话结束: %s (code=%s, %s)", peer, code, close_reason)
 
     return ws
 
@@ -237,7 +318,7 @@ def main() -> None:
 
     print()
     print("=" * 52)
-    print("  Phone Touchpad — WiFi 版 已启动 (240Hz + binary)")
+    print("  Phone Touchpad — WiFi 版 已启动")
     print("=" * 52)
     print(f"  电脑本机:  http://127.0.0.1:{args.port}/")
     print(f"  手机触控板: {pad_url}")

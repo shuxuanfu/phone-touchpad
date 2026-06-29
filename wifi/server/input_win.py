@@ -1,4 +1,4 @@
-"""Windows 低延迟鼠标/滚轮注入（ctypes SendInput，子像素累积减少抖动）。"""
+"""Windows 低延迟鼠标/滚轮注入（ctypes SendInput，绕过 pynput 移动路径）。"""
 
 from __future__ import annotations
 
@@ -18,12 +18,13 @@ MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
 
 WHEEL_DELTA = 120
-# 客户端滚速=1.0 时，每像素对应的滚轮单位（120≈一格）
-SCROLL_UNITS_PER_PIXEL = 5.0
+# 客户端已 ×0.9 后的像素位移；约 22 单位 ≈ 一格滚轮（手指约 24px）
+PIXELS_PER_NOTCH = 22.0
+# 允许短暂积压，避免快速滑动时被截断
+MAX_SCROLL_REMAINDER = WHEEL_DELTA * 12
 
 ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 
-# 子像素余量，避免每帧 round 造成阶梯感
 _remainder_x = 0.0
 _remainder_y = 0.0
 _remainder_scroll = 0.0
@@ -69,16 +70,36 @@ def move_relative(dx: float, dy: float) -> None:
         _send_mouse(MOUSEEVENTF_MOVE, mx, my)
 
 
-def scroll_vertical(delta: float) -> None:
+def scroll_accumulate(delta: float) -> None:
     global _remainder_scroll
     if not delta:
         return
-    _remainder_scroll += delta * SCROLL_UNITS_PER_PIXEL
-    wheel = round(_remainder_scroll)
+    _remainder_scroll += delta * (WHEEL_DELTA / PIXELS_PER_NOTCH)
+    if _remainder_scroll > MAX_SCROLL_REMAINDER:
+        _remainder_scroll = MAX_SCROLL_REMAINDER
+    elif _remainder_scroll < -MAX_SCROLL_REMAINDER:
+        _remainder_scroll = -MAX_SCROLL_REMAINDER
+
+
+def scroll_flush() -> None:
+    global _remainder_scroll
+    wheel = int(_remainder_scroll)
     if wheel == 0:
         return
     _remainder_scroll -= wheel
-    _send_mouse(MOUSEEVENTF_WHEEL, data=int(wheel))
+    _send_mouse(MOUSEEVENTF_WHEEL, data=wheel)
+
+
+def scroll_vertical(delta: float) -> None:
+    scroll_accumulate(delta)
+    scroll_flush()
+
+
+def reset_motion_remainders() -> None:
+    global _remainder_x, _remainder_y, _remainder_scroll
+    _remainder_x = 0.0
+    _remainder_y = 0.0
+    _remainder_scroll = 0.0
 
 
 _BUTTON_FLAGS = {

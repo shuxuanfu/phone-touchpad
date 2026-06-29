@@ -76,10 +76,9 @@
       background: #1c1c22;
       color: var(--text);
       border-radius: 10px;
-      padding: 8px 10px;
-      font-size: 12px;
+      padding: 8px 12px;
+      font-size: 13px;
       cursor: pointer;
-      white-space: nowrap;
     }
 
     button.icon-btn.active {
@@ -142,6 +141,30 @@
       transform: scale(1);
     }
 
+    .voice-btn {
+      position: absolute;
+      bottom: calc(24px + env(safe-area-inset-bottom));
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      border: 2px solid var(--border);
+      background: #1c1c22;
+      color: var(--text);
+      border-radius: 999px;
+      padding: 14px 36px;
+      font-size: 16px;
+      font-weight: 600;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    .voice-btn.active {
+      border-color: var(--ok);
+      background: rgba(48, 209, 88, 0.18);
+      color: var(--ok);
+    }
+
   </style>
 </head>
 <body>
@@ -152,8 +175,7 @@
         <span id="statusText">连接中...</span>
       </div>
       <div class="toolbar">
-        <button class="icon-btn" id="btnSens" title="移动灵敏度">移动</button>
-        <button class="icon-btn" id="btnScrollSens" title="上下滚动灵敏度">滚速</button>
+        <button class="icon-btn" id="btnSens" title="灵敏度">灵敏度</button>
         <button class="icon-btn" id="btnScroll" title="双指滚动模式">滚动</button>
         <button class="icon-btn" id="btnKeyboard" title="打开键盘">键盘</button>
       </div>
@@ -162,10 +184,12 @@
       <div class="hint" id="hint">
         单指移动光标<br />
         单击 / 双击点击<br />
-        双指上滑/下滑滚动 · 建议用 Safari 打开<br />
-        双指轻点 = 右键
+        双指上滑 · 页面向上 · 双指下滑 · 页面向下<br />
+        双指轻点 = 右键<br />
+        建议用 Safari 打开，避免内置浏览器断连
       </div>
       <div class="touch-dot" id="touchDot"></div>
+      <button type="button" class="voice-btn" id="btnVoice" title="按住说话（Ctrl+Alt）">说话</button>
     </div>
   </div>
 
@@ -176,38 +200,26 @@
     const hint = document.getElementById("hint");
     const touchDot = document.getElementById("touchDot");
     const btnSens = document.getElementById("btnSens");
-    const btnScrollSens = document.getElementById("btnScrollSens");
     const btnScroll = document.getElementById("btnScroll");
     const btnKeyboard = document.getElementById("btnKeyboard");
+    const btnVoice = document.getElementById("btnVoice");
 
-    const BIN_MOVE = 1;
-    const BIN_SCROLL = 2;
-    const moveBuf = new ArrayBuffer(9);
-    const moveView = new DataView(moveBuf);
-    const scrollBuf = new ArrayBuffer(5);
-    const scrollView = new DataView(scrollBuf);
+    const VOICE_KEYS = ["ctrl", "alt"];
 
     let ws = null;
     let reconnectTimer = null;
-    let wakeLock = null;
+    let keepaliveTimer = null;
+    let reconnectAttempt = 0;
     let scrollMode = false;
     let sensitivity = parseFloat(localStorage.getItem("pt_sens") || "2.2");
-    let scrollSensitivity = parseFloat(localStorage.getItem("pt_scroll_sens") || "0.35");
-    if (localStorage.getItem("pt_scroll_ver") !== "3") {
-      scrollSensitivity = 0.35;
-      localStorage.setItem("pt_scroll_sens", "0.35");
-      localStorage.setItem("pt_scroll_ver", "3");
-    }
-    const SCROLL_SENS_OPTIONS = [0.2, 0.35, 0.5, 0.7, 1.0, 1.3];
 
-    const touchLast = new Map();
-    let activeTouchCount = 0;
-    let useBinary = true;
-
+    // 每帧合并移动/滚动，减少 WebSocket 消息数量
     let pendingDx = 0;
     let pendingDy = 0;
     let pendingScroll = 0;
     let flushRaf = null;
+    let scrollFlushTimer = null;
+    const SCROLL_SEND_MS = 20; // 约 50Hz 发送滚动，减轻 Wi-Fi / 服务端压力
 
     const LONG_PRESS_MS = 280;
     const TAP_MAX_MOVE = 12;
@@ -220,48 +232,22 @@
     let longPressTimer = null;
     let lastTapTime = 0;
     let movedSinceDown = false;
-
-    const supportsPointer = "PointerEvent" in window;
+    let voiceActive = false;
 
     function wsUrl() {
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       return `${proto}//${location.host}/ws`;
     }
 
-    async function requestWakeLock() {
-      try {
-        if ("wakeLock" in navigator) {
-          wakeLock = await navigator.wakeLock.request("screen");
-        }
-      } catch (_) {}
-    }
-
-    function sendJson(msg) {
+    function send(msg) {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(msg));
       }
     }
 
-    function sendMoveBinary(dx, dy) {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      if (useBinary) {
-        moveView.setUint8(0, BIN_MOVE);
-        moveView.setFloat32(1, dx, true);
-        moveView.setFloat32(5, dy, true);
-        ws.send(moveBuf);
-      } else {
-        ws.send(`m,${dx.toFixed(2)},${dy.toFixed(2)}`);
-      }
-    }
-
-    function sendScrollBinary(dy) {
-      if (!ws || ws.readyState === WebSocket.OPEN) return;
-      if (useBinary) {
-        scrollView.setUint8(0, BIN_SCROLL);
-        scrollView.setFloat32(1, dy, true);
-        ws.send(scrollBuf);
-      } else {
-        ws.send(`s,${dy.toFixed(2)}`);
+    function sendCompact(text) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(text);
       }
     }
 
@@ -270,55 +256,95 @@
       flushRaf = requestAnimationFrame(flushMotion);
     }
 
+    function scheduleScrollFlush() {
+      if (scrollFlushTimer !== null) return;
+      scrollFlushTimer = setTimeout(() => {
+        scrollFlushTimer = null;
+        flushScrollOnly();
+      }, SCROLL_SEND_MS);
+    }
+
+    function flushScrollOnly(immediate = false) {
+      if (scrollFlushTimer !== null) {
+        clearTimeout(scrollFlushTimer);
+        scrollFlushTimer = null;
+      }
+      if (pendingScroll === 0) return;
+      const dy = pendingScroll * 0.9;
+      pendingScroll = 0;
+      sendCompact(`s,${dy.toFixed(1)}`);
+      if (!immediate) hint.classList.add("hidden");
+    }
+
     function flushMotion() {
       flushRaf = null;
       const s = scrollMode ? 1.0 : sensitivity;
 
       if (pendingDx !== 0 || pendingDy !== 0) {
-        sendMoveBinary(pendingDx * s, pendingDy * s);
+        const dx = pendingDx * s;
+        const dy = pendingDy * s;
         pendingDx = 0;
         pendingDy = 0;
+        sendCompact(`m,${dx.toFixed(2)},${dy.toFixed(2)}`);
         hint.classList.add("hidden");
       }
 
-      if (pendingScroll !== 0) {
-        sendScrollBinary(pendingScroll * scrollSensitivity);
-        pendingScroll = 0;
-        hint.classList.add("hidden");
-      }
+      flushScrollOnly();
     }
 
     function queueMove(dx, dy) {
-      if (!dx && !dy) return;
       pendingDx += dx;
       pendingDy += dy;
       scheduleFlush();
     }
 
     function queueScroll(dy) {
-      if (!dy) return;
       pendingScroll += dy;
-      scheduleFlush();
+      scheduleScrollFlush();
+    }
+
+    function startKeepalive() {
+      stopKeepalive();
+      keepaliveTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          send({ type: "ping" });
+        }
+      }, 25000);
+    }
+
+    function stopKeepalive() {
+      if (keepaliveTimer) {
+        clearInterval(keepaliveTimer);
+        keepaliveTimer = null;
+      }
     }
 
     function connect() {
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
+      const oldWs = ws;
       ws = new WebSocket(wsUrl());
-      ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
+        reconnectAttempt = 0;
         dot.classList.add("connected");
-        statusText.textContent = supportsPointer ? "已连接 · 流畅模式" : "已连接";
-        sendJson({ type: "hello", device: navigator.userAgent });
-        requestWakeLock();
+        statusText.textContent = "已连接";
+        send({ type: "hello", device: navigator.userAgent });
+        startKeepalive();
+        if (oldWs && oldWs !== ws) {
+          try { oldWs.close(); } catch (_) {}
+        }
       };
 
       ws.onclose = () => {
+        stopKeepalive();
         dot.classList.remove("connected");
         statusText.textContent = "已断开，重连中...";
+        stopVoice();
         clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(connect, 1500);
+        reconnectAttempt += 1;
+        const delay = Math.min(1500 * reconnectAttempt, 8000);
+        reconnectTimer = setTimeout(connect, delay);
       };
 
       ws.onerror = () => {
@@ -337,260 +363,149 @@
       touchDot.classList.remove("show");
     }
 
+    function handleMove(dx, dy) {
+      queueMove(dx, dy);
+    }
+
+    function handleScroll(dy) {
+      queueScroll(dy);
+    }
+
     function updateSensLabel() {
-      btnSens.textContent = `移动×${sensitivity.toFixed(1)}`;
+      btnSens.textContent = `×${sensitivity.toFixed(1)}`;
     }
-
-    function updateScrollSensLabel() {
-      btnScrollSens.textContent = `滚速×${scrollSensitivity.toFixed(2)}`;
-    }
-
     updateSensLabel();
-    updateScrollSensLabel();
 
-    function pointerCount() {
-      return pointers.size;
-    }
-
-    function applyMoveDeltas(pid, events) {
-      const p = pointers.get(pid);
-      if (!p) return;
-
-      let moveDx = 0;
-      let moveDy = 0;
-      let scrollDy = 0;
-      const multi = pointerCount() >= 2 && activeTouchCount < 2;
-
-      for (const ev of events) {
-        const dx = ev.clientX - p.x;
-        const dy = ev.clientY - p.y;
-        p.x = ev.clientX;
-        p.y = ev.clientY;
-
-        if (multi || scrollMode) {
-          scrollDy += dy;
-        } else {
-          moveDx += dx;
-          moveDy += dy;
-        }
+    pad.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        pointers.set(t.identifier, { x: t.clientX, y: t.clientY, startX: t.clientX, startY: t.clientY, startTime: Date.now() });
       }
 
-      if (multi || scrollMode) {
-        if (scrollDy) queueScroll(scrollDy);
-      } else if (moveDx || moveDy) {
-        queueMove(moveDx, moveDy);
-      }
-    }
-
-    function onDownCommon(id, x, y) {
-      pointers.set(id, { x, y, startX: x, startY: y, startTime: Date.now() });
-
-      if (pointerCount() === 1) {
-        primaryId = id;
+      if (pointers.size === 1) {
+        primaryId = e.changedTouches[0].identifier;
         movedSinceDown = false;
         dragActive = false;
         clearTimeout(longPressTimer);
         longPressTimer = setTimeout(() => {
-          if (!movedSinceDown && pointerCount() === 1) {
+          if (!movedSinceDown && pointers.size === 1) {
             dragActive = true;
-            sendJson({ type: "down", button: "left" });
+            send({ type: "down", button: "left" });
           }
         }, LONG_PRESS_MS);
-        showTouchVisual(x, y);
+        showTouchVisual(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
       }
 
-      if (pointerCount() === 2) {
+      if (pointers.size === 2) {
         clearTimeout(longPressTimer);
         if (dragActive) {
-          sendJson({ type: "up", button: "left" });
+          send({ type: "up", button: "left" });
           dragActive = false;
         }
       }
-    }
-
-    function onMoveCommon(id, events, visualX, visualY) {
-      const p = pointers.get(id);
-      if (!p) return;
-
-      const first = events[0];
-      if (Math.abs(first.clientX - p.startX) > TAP_MAX_MOVE || Math.abs(first.clientY - p.startY) > TAP_MAX_MOVE) {
-        movedSinceDown = true;
-        clearTimeout(longPressTimer);
-      }
-
-      applyMoveDeltas(id, events);
-      showTouchVisual(visualX, visualY);
-    }
-
-    function onUpCommon(id, x, y) {
-      const p = pointers.get(id);
-      if (!p) return;
-
-      const elapsed = Date.now() - p.startTime;
-      const dist = Math.hypot(x - p.startX, y - p.startY);
-      const countBefore = pointerCount();
-
-      if (countBefore === 2 && elapsed < TAP_MAX_MS && dist < TAP_MAX_MOVE) {
-        sendJson({ type: "click", button: "right" });
-      } else if (countBefore === 1 && id === primaryId) {
-        flushMotion();
-        clearTimeout(longPressTimer);
-        if (dragActive) {
-          sendJson({ type: "up", button: "left" });
-          dragActive = false;
-        } else if (!movedSinceDown && elapsed < TAP_MAX_MS && dist < TAP_MAX_MOVE) {
-          const now = Date.now();
-          if (now - lastTapTime < DOUBLE_TAP_MS) {
-            sendJson({ type: "click", button: "left", count: 2 });
-            lastTapTime = 0;
-          } else {
-            sendJson({ type: "click", button: "left", count: 1 });
-            lastTapTime = now;
-          }
-        }
-      }
-
-      pointers.delete(id);
-
-      if (pointerCount() === 0) {
-        flushMotion();
-        primaryId = null;
-        hideTouchVisual();
-      }
-    }
-
-    if (supportsPointer) {
-      pad.addEventListener("pointerdown", (e) => {
-        if (e.pointerType === "mouse" && e.button !== 0) return;
-        e.preventDefault();
-        pad.setPointerCapture(e.pointerId);
-        onDownCommon(e.pointerId, e.clientX, e.clientY);
-      }, { passive: false });
-
-      pad.addEventListener("pointermove", (e) => {
-        if (!pointers.has(e.pointerId)) return;
-        if (activeTouchCount >= 2) return;
-        e.preventDefault();
-        const coalesced = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-        onMoveCommon(e.pointerId, coalesced, e.clientX, e.clientY);
-      }, { passive: false });
-
-      pad.addEventListener("pointerup", (e) => {
-        if (!pointers.has(e.pointerId)) return;
-        e.preventDefault();
-        onUpCommon(e.pointerId, e.clientX, e.clientY);
-        try { pad.releasePointerCapture(e.pointerId); } catch (_) {}
-      }, { passive: false });
-
-      pad.addEventListener("pointercancel", (e) => {
-        if (!pointers.has(e.pointerId)) return;
-        flushMotion();
-        pointers.delete(e.pointerId);
-        if (pointerCount() === 0) {
-          primaryId = null;
-          hideTouchVisual();
-        }
-      }, { passive: false });
-    } else {
-      pad.addEventListener("touchstart", (e) => {
-        e.preventDefault();
-        activeTouchCount = e.touches.length;
-        for (const t of e.changedTouches) {
-          onDownCommon(t.identifier, t.clientX, t.clientY);
-        }
-        for (const t of e.touches) {
-          touchLast.set(t.identifier, { x: t.clientX, y: t.clientY });
-        }
-      }, { passive: false });
-
-      pad.addEventListener("touchmove", (e) => {
-        e.preventDefault();
-        activeTouchCount = e.touches.length;
-
-        if (e.touches.length >= 2) {
-          let sumDy = 0;
-          for (const t of e.touches) {
-            const prev = touchLast.get(t.identifier);
-            if (prev) sumDy += t.clientY - prev.y;
-            touchLast.set(t.identifier, { x: t.clientX, y: t.clientY });
-          }
-          queueScroll(sumDy / e.touches.length);
-          hint.classList.add("hidden");
-          return;
-        }
-
-        for (const t of e.changedTouches) {
-          if (!pointers.has(t.identifier)) continue;
-          const p = pointers.get(t.identifier);
-          onMoveCommon(t.identifier, [{ clientX: t.clientX, clientY: t.clientY, startX: p.startX, startY: p.startY }], t.clientX, t.clientY);
-        }
-      }, { passive: false });
-
-      pad.addEventListener("touchend", (e) => {
-        e.preventDefault();
-        activeTouchCount = e.touches.length;
-        for (const t of e.changedTouches) {
-          touchLast.delete(t.identifier);
-          onUpCommon(t.identifier, t.clientX, t.clientY);
-        }
-      }, { passive: false });
-
-      pad.addEventListener("touchcancel", () => {
-        flushMotion();
-        activeTouchCount = 0;
-        touchLast.clear();
-        const wasDrag = dragActive;
-        pointers.clear();
-        primaryId = null;
-        dragActive = false;
-        clearTimeout(longPressTimer);
-        hideTouchVisual();
-        if (wasDrag) sendJson({ type: "up", button: "left" });
-      }, { passive: false });
-    }
-
-    // iOS 双指滚动：始终走 Touch（Pointer 双指在 Safari/微信里不可靠）
-    pad.addEventListener("touchstart", (e) => {
-      activeTouchCount = e.touches.length;
-      for (const t of e.touches) {
-        if (!touchLast.has(t.identifier)) {
-          touchLast.set(t.identifier, { x: t.clientX, y: t.clientY });
-        }
-      }
-    }, { passive: true });
+    }, { passive: false });
 
     pad.addEventListener("touchmove", (e) => {
-      activeTouchCount = e.touches.length;
-      if (e.touches.length < 2) return;
-
       e.preventDefault();
-      let sumDy = 0;
-      let count = 0;
-      for (const t of e.touches) {
-        const prev = touchLast.get(t.identifier);
-        if (prev) {
-          sumDy += t.clientY - prev.y;
+
+      if (pointers.size === 1) {
+        const t = e.changedTouches[0];
+        const p = pointers.get(t.identifier);
+        if (!p) return;
+
+        const dx = t.clientX - p.x;
+        const dy = t.clientY - p.y;
+
+        if (Math.abs(t.clientX - p.startX) > TAP_MAX_MOVE || Math.abs(t.clientY - p.startY) > TAP_MAX_MOVE) {
+          movedSinceDown = true;
+          clearTimeout(longPressTimer);
+        }
+
+        if (scrollMode) {
+          handleScroll(dy);
+        } else {
+          handleMove(dx, dy);
+        }
+
+        p.x = t.clientX;
+        p.y = t.clientY;
+        showTouchVisual(t.clientX, t.clientY);
+        return;
+      }
+
+      if (pointers.size >= 2) {
+        let sumDy = 0;
+        let count = 0;
+        for (let i = 0; i < e.touches.length; i++) {
+          const t = e.touches[i];
+          const p = pointers.get(t.identifier);
+          if (!p) continue;
+          sumDy += t.clientY - p.y;
+          p.x = t.clientX;
+          p.y = t.clientY;
           count++;
         }
-        touchLast.set(t.identifier, { x: t.clientX, y: t.clientY });
-      }
-      if (count > 0) {
-        queueScroll(sumDy / count);
-        hint.classList.add("hidden");
+        if (count > 0) {
+          handleScroll(sumDy / count);
+        }
       }
     }, { passive: false });
 
     pad.addEventListener("touchend", (e) => {
-      activeTouchCount = e.touches.length;
+      e.preventDefault();
+      const touchCountBefore = pointers.size;
+
       for (const t of e.changedTouches) {
-        touchLast.delete(t.identifier);
+        const p = pointers.get(t.identifier);
+        if (!p) continue;
+
+        const elapsed = Date.now() - p.startTime;
+        const dist = Math.hypot(t.clientX - p.startX, t.clientY - p.startY);
+
+        if (pointers.size === 2 && elapsed < TAP_MAX_MS && dist < TAP_MAX_MOVE) {
+          send({ type: "click", button: "right" });
+        } else if (pointers.size === 1 && t.identifier === primaryId) {
+          flushMotion();
+          clearTimeout(longPressTimer);
+          if (dragActive) {
+            send({ type: "up", button: "left" });
+            dragActive = false;
+          } else if (!movedSinceDown && elapsed < TAP_MAX_MS && dist < TAP_MAX_MOVE) {
+            const now = Date.now();
+            if (now - lastTapTime < DOUBLE_TAP_MS) {
+              send({ type: "click", button: "left", count: 2 });
+              lastTapTime = 0;
+            } else {
+              send({ type: "click", button: "left", count: 1 });
+              lastTapTime = now;
+            }
+          }
+        }
+
+        pointers.delete(t.identifier);
       }
-    }, { passive: true });
+
+      if (touchCountBefore >= 2 && pointers.size < 2) {
+        flushScrollOnly(true);
+      }
+
+      if (pointers.size === 0) {
+        flushMotion();
+        primaryId = null;
+        hideTouchVisual();
+      }
+    }, { passive: false });
 
     pad.addEventListener("touchcancel", () => {
-      activeTouchCount = 0;
-      touchLast.clear();
-    }, { passive: true });
+      flushMotion();
+      pointers.clear();
+      primaryId = null;
+      const wasDrag = dragActive;
+      dragActive = false;
+      clearTimeout(longPressTimer);
+      hideTouchVisual();
+      if (wasDrag) send({ type: "up", button: "left" });
+    }, { passive: false });
 
     btnSens.addEventListener("click", () => {
       const options = ["1.5", "2.0", "2.2", "2.8", "3.5"];
@@ -601,14 +516,6 @@
       updateSensLabel();
     });
 
-    btnScrollSens.addEventListener("click", () => {
-      const idx = SCROLL_SENS_OPTIONS.findIndex(v => v >= scrollSensitivity - 0.001);
-      const next = SCROLL_SENS_OPTIONS[(idx + 1) % SCROLL_SENS_OPTIONS.length];
-      scrollSensitivity = next;
-      localStorage.setItem("pt_scroll_sens", String(scrollSensitivity));
-      updateScrollSensLabel();
-    });
-
     btnScroll.addEventListener("click", () => {
       scrollMode = !scrollMode;
       btnScroll.classList.toggle("active", scrollMode);
@@ -617,15 +524,69 @@
 
     btnKeyboard.addEventListener("click", () => {
       const text = prompt("输入要发送到电脑的文字：");
-      if (text) sendJson({ type: "type", text });
+      if (text) send({ type: "type", text });
+    });
+
+    function startVoice() {
+      if (voiceActive) return;
+      voiceActive = true;
+      btnVoice.classList.add("active");
+      btnVoice.textContent = "录音中…";
+      send({ type: "hotkey_down", keys: VOICE_KEYS });
+    }
+
+    function stopVoice() {
+      if (!voiceActive) return;
+      voiceActive = false;
+      btnVoice.classList.remove("active");
+      btnVoice.textContent = "说话";
+      send({ type: "hotkey_up", keys: VOICE_KEYS });
+    }
+
+    btnVoice.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startVoice();
+    }, { passive: false });
+
+    btnVoice.addEventListener("touchend", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      stopVoice();
+    }, { passive: false });
+
+    btnVoice.addEventListener("touchcancel", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      stopVoice();
+    }, { passive: false });
+
+    btnVoice.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      startVoice();
+    });
+
+    btnVoice.addEventListener("mouseup", (e) => {
+      e.preventDefault();
+      stopVoice();
+    });
+
+    btnVoice.addEventListener("mouseleave", () => {
+      stopVoice();
     });
 
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
-        connect();
-        requestWakeLock();
+        stopVoice();
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          connect();
+        }
+      } else {
+        stopVoice();
       }
     });
+
+    window.addEventListener("online", () => connect());
 
     connect();
   </script>
