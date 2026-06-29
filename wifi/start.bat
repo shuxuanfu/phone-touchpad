@@ -1,36 +1,40 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
 
 where python >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 未找到 Python。请先安装 Python 3.10+：https://www.python.org/downloads/
-    echo 安装时勾选 "Add Python to PATH"。
+    echo [ERROR] Python not found. Install Python 3.10+ and add to PATH.
+    echo https://www.python.org/downloads/
     pause
     exit /b 1
 )
 
-set "VENV_PY=.venv\Scripts\python.exe"
-set "VENV_ACT=.venv\Scripts\activate.bat"
+rem Prefer root venv, then wifi venv, else create wifi venv
+set "VENV_PY="
+if exist "..\.venv\Scripts\python.exe" set "VENV_PY=..\.venv\Scripts\python.exe"
+if not defined VENV_PY if exist ".venv\Scripts\python.exe" set "VENV_PY=.venv\Scripts\python.exe"
 
-if not exist "%VENV_PY%" (
-    if exist "..\.venv\Scripts\python.exe" (
-        set "VENV_PY=..\.venv\Scripts\python.exe"
-        set "VENV_ACT=..\.venv\Scripts\activate.bat"
-    ) else (
-        echo 首次运行，正在创建虚拟环境并安装依赖...
-        python -m venv .venv
-        call .venv\Scripts\activate.bat
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        goto :run
+if not defined VENV_PY (
+    echo First run: creating virtual environment...
+    python -m venv .venv
+    if errorlevel 1 (
+        echo [ERROR] Failed to create virtual environment.
+        pause
+        exit /b 1
+    )
+    set "VENV_PY=.venv\Scripts\python.exe"
+    echo Installing dependencies...
+    "%VENV_PY%" -m pip install --upgrade pip
+    "%VENV_PY%" -m pip install -r requirements.txt
+    if errorlevel 1 (
+        echo [ERROR] Failed to install dependencies.
+        pause
+        exit /b 1
     )
 )
 
-call "%VENV_ACT%"
-
-:run
 echo.
-echo 启动 Phone Touchpad — WiFi 版...
-python server\main.py
+echo Starting Phone Touchpad WiFi...
+"%VENV_PY%" server\main.py
 pause

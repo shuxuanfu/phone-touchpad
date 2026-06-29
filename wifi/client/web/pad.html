@@ -160,7 +160,7 @@
       <div class="hint" id="hint">
         单指移动光标<br />
         单击 / 双击点击<br />
-        长按拖动 · 双指滚动<br />
+        双指上滑 · 页面向上 · 双指下滑 · 页面向下<br />
         双指轻点 = 右键
       </div>
       <div class="touch-dot" id="touchDot"></div>
@@ -348,7 +348,7 @@
         }
 
         if (scrollMode) {
-          handleScroll(-dy);
+          handleScroll(dy);
         } else {
           handleMove(dx, dy);
         }
@@ -371,7 +371,7 @@
           count++;
         }
         if (count > 0) {
-          handleScroll(-(avgDy / count));
+          handleScroll(avgDy / count);
         }
       }
     }, { passive: false });
