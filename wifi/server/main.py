@@ -47,6 +47,7 @@ _held_hotkeys: list[str] = []
 
 # 服务端合并移动/滚动，以固定频率刷入系统（约 120Hz）
 TICK_SEC = 1 / 120
+IDLE_TICK_SEC = 0.5  # 无客户端时降低唤醒频率，节省 CPU
 # 滚轮每 N 次 tick 才真正 SendInput 一次（降低系统输入压力）
 SCROLL_FLUSH_EVERY = 3  # ≈40Hz
 # 单次刷入上限，避免异常积压
@@ -58,15 +59,59 @@ _pending_move = [0.0, 0.0]
 _pending_scroll = 0.0
 _input_lock = threading.Lock()
 _scroll_loop_tick = 0
+_clients_lock = threading.Lock()
+_active_clients = 0
+_cached_lan_ip: str | None = None
+_qr_cache: dict[str, bytes] = {}
 
 
 def local_ip() -> str:
+    global _cached_lan_ip
+    if _cached_lan_ip:
+        return _cached_lan_ip
+
+    # 优先：UDP 探测默认出口（有外网时最准）
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
+            ip = s.getsockname()[0]
+            if not ip.startswith("127."):
+                _cached_lan_ip = ip
+                return ip
     except OSError:
-        return "127.0.0.1"
+        pass
+
+    # 离线 / 纯局域网：遍历本机网卡地址
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip.startswith("127."):
+                continue
+            _cached_lan_ip = ip
+            return ip
+    except OSError:
+        pass
+
+    return "127.0.0.1"
+
+
+def _has_pending_motion() -> bool:
+    with _move_lock:
+        return bool(_pending_move[0] or _pending_move[1] or _pending_scroll)
+
+
+def _client_connected() -> None:
+    global _active_clients
+    with _clients_lock:
+        _active_clients += 1
+
+
+def _client_disconnected() -> None:
+    global _active_clients, _scroll_loop_tick
+    with _clients_lock:
+        _active_clients = max(0, _active_clients - 1)
+        if _active_clients == 0:
+            _scroll_loop_tick = 0
 
 
 def _release_all_hotkeys() -> None:
@@ -219,8 +264,14 @@ def handle_action(msg: dict) -> None:
 
 
 def motion_loop(stop: threading.Event) -> None:
-    while not stop.wait(TICK_SEC):
-        flush_motion()
+    while True:
+        with _clients_lock:
+            active = _active_clients > 0
+        wait_sec = TICK_SEC if active else IDLE_TICK_SEC
+        if stop.wait(wait_sec):
+            break
+        if active or _has_pending_motion():
+            flush_motion(force_scroll=not active)
 
 
 _motion_stop = threading.Event()
@@ -237,6 +288,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=60, compress=False)
     await ws.prepare(request)
     peer = request.remote
+    _client_connected()
     log.info("WebSocket 会话开始: %s", peer)
     close_reason = "正常关闭"
 
@@ -280,6 +332,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         with _input_lock:
             input_win.reset_motion_remainders()
             _release_all_hotkeys()
+        _client_disconnected()
         code = ws.close_code if ws.close_code is not None else "-"
         log.info("WebSocket 会话结束: %s (code=%s, %s)", peer, code, close_reason)
 
@@ -297,14 +350,22 @@ async def pad_handler(_: web.Request) -> web.Response:
 
 
 async def qr_handler(request: web.Request) -> web.Response:
-    import qrcode
-
     host = request.host
     url = f"http://{host}/pad"
+    cached = _qr_cache.get(url)
+    if cached is not None:
+        return web.Response(body=cached, content_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
+
+    import qrcode
+
     img = qrcode.make(url)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return web.Response(body=buf.getvalue(), content_type="image/png")
+    png = buf.getvalue()
+    if len(_qr_cache) > 8:
+        _qr_cache.clear()
+    _qr_cache[url] = png
+    return web.Response(body=png, content_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
 
 
 async def info_handler(request: web.Request) -> web.Response:
@@ -320,7 +381,7 @@ async def info_handler(request: web.Request) -> web.Response:
 
 
 def build_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(client_max_size=1024 * 64)
     app.router.add_get("/", index_handler)
     app.router.add_get("/pad", pad_handler)
     app.router.add_get("/ws", websocket_handler)
@@ -359,7 +420,13 @@ def main() -> None:
     if not args.no_browser:
         webbrowser.open(f"http://127.0.0.1:{args.port}/")
 
-    web.run_app(build_app(), host=args.host, port=args.port, print=None)
+    web.run_app(
+        build_app(),
+        host=args.host,
+        port=args.port,
+        print=None,
+        access_log=None,
+    )
 
 
 if __name__ == "__main__":
